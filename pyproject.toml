@@ -1,0 +1,10 @@
+[project]
+name = "starship-sabotage"
+version = "0.1.0"
+description = "Text-based Among Us-like game on UNIX domain sockets (CSE 536 Project 1)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.uv]
+managed = true
