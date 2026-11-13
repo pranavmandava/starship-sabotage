@@ -68,6 +68,26 @@ sudo requires a password interactively, run `sudo ./play.sh`. Cgroups constrain
 only the process tree the launcher starts; a manually started unconfined process
 is outside the threat model. Run one isolated game at a time.
 
+### Connection security
+
+The server does not trust the name in the JSON hello message. On Linux it reads
+the peer's UID with `SO_PEERCRED`, and in `--users` mode it passes an
+`--allow-users` list so each connection must come from one of the expected
+Linux users and the claimed name must match that user. A name is also bound to
+the first UID that claimed it, so a different local user cannot reuse it after a
+disconnect. Clients must send a valid hello within 5 seconds or the connection
+is closed.
+
+The socket itself defaults to mode `0777` so distinct users can connect without
+a shared group; unlisted UIDs are rejected at the application layer. If you
+create a dedicated group for the players, tighten the filesystem permissions
+too:
+
+```bash
+./play.sh --users "wolf1 crew1 crew2 crew3 crew4" \
+    --socket-mode 0660 --socket-group starship
+```
+
 ## Commands
 
 Type these in a client window:
@@ -91,11 +111,14 @@ them. A tie vote ejects nobody. Bodies are not auto-announced.
 
 ```bash
 sudo python3 test_isolation.py --game
+sudo python3 test_security.py
 ```
 
-This asserts on kernel counters (`memory.peak`, `pids.peak`, `cpu.stat`,
-`memory.events`) and runs a real five-player game: four bots plus a hostile
-attacker that is OOM-killed inside its own leaf while the server stays alive.
+`test_isolation.py` asserts on kernel counters (`memory.peak`, `pids.peak`,
+`cpu.stat`, `memory.events`) and runs a real five-player game: four bots plus a
+hostile attacker that is OOM-killed inside its own leaf while the server stays
+alive. `test_security.py` checks peer-UID authorization, name binding, the hello
+timeout, and socket mode.
 
 Manual attack demo:
 
@@ -118,7 +141,8 @@ domain `SOCK_STREAM` sockets with `asyncio` and JSON-lines framing:
 
 - `encode_msg(msg) -> bytes` / `decode_msg(line) -> dict`
 - `send_msg(writer, msg)` / `recv_msg(reader) -> dict`
-- `connect_socket(path)` / `serve_unix(path, handler)`
+- `connect_socket(path)` / `serve_unix(path, handler, mode=0o777, gid=None)`
+- `peer_credentials(writer) -> dict | None` — Linux `SO_PEERCRED` (pid/uid/gid)
 - `DEFAULT_SOCKET_PATH`
 
 Unicast messages are the private `welcome` (role) and `result`; broadcast
@@ -136,6 +160,7 @@ Other files:
 - `attack.py` — memory/fork/CPU/flood/oversize attacks.
 - `bot.py` — auto-player used by the end-to-end test.
 - `test_isolation.py` — kernel-counter tests and the five-player survival game.
+- `test_security.py` — peer-UID, name-binding, hello-timeout, malformed-input, and socket-mode tests.
 - `pyproject.toml` — packaging metadata (stdlib only).
 
 The report, poster, and submission tarball are course deliverables kept local;

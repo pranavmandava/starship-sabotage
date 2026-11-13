@@ -13,6 +13,8 @@ Concurrency model:
 
 import argparse
 import asyncio
+import grp
+import pwd
 import random
 
 import commlib
@@ -20,6 +22,17 @@ import commlib
 # Bounded per-client outbox. If a peer stops reading, its queue fills and the
 # connection is dropped instead of stalling the game.
 SEND_QUEUE_MAX = 256
+
+# A client must identify itself promptly; otherwise a half-open connection can
+# occupy a lobby slot indefinitely.
+HELLO_TIMEOUT = 5.0
+
+# Optional peer-UID allowlist: uid -> expected player name.  It is populated by
+# --allow-users, which play.sh passes in the one-Linux-user-per-player mode.
+ALLOWED_UIDS = {}
+
+# First UID that claimed a name.  A different UID cannot reuse it later.
+NAME_OWNERS = {}
 
 # ---- Game state (single process, guarded by asyncio.Lock) ----
 STATE = {
@@ -212,6 +225,9 @@ async def leak_task():
 
 
 async def handle_action(name, msg):
+    if not isinstance(msg, dict):
+        unicast(name, {"type": "result", "ok": False, "reason": "malformed message"})
+        return
     async with LOCK:
         p = STATE["players"].get(name)
         if p is None or STATE["phase"] == "OVER":
@@ -343,8 +359,25 @@ async def handle_client(reader, writer):
     name = ""
     sender = None
     joined = False
+    creds = commlib.peer_credentials(writer)
+    uid = creds["uid"] if creds else None
+    pid = creds["pid"] if creds else None
     try:
-        hello = await commlib.recv_msg(reader)
+        # Reject unlisted UIDs before spending the hello timeout on them.
+        if ALLOWED_UIDS and (uid is None or uid not in ALLOWED_UIDS):
+            await reject_connection(writer, "not an authorized player")
+            return
+
+        try:
+            hello = await asyncio.wait_for(commlib.recv_msg(reader),
+                                           timeout=HELLO_TIMEOUT)
+        except asyncio.TimeoutError:
+            await reject_connection(writer, "hello timeout")
+            return
+
+        if not isinstance(hello, dict):
+            await reject_connection(writer, "first msg must be hello+name")
+            return
         name = str(hello.get("name", ""))[:20]
         if hello.get("type") != "hello" or not name:
             await reject_connection(writer, "first msg must be hello+name")
@@ -352,19 +385,26 @@ async def handle_client(reader, writer):
 
         reason = ""
         async with LOCK:
+            expected_name = ALLOWED_UIDS.get(uid)
             # The lobby closes permanently once the game starts.
             if STATE["phase"] != "LOBBY":
                 reason = "game already in progress" if STATE["phase"] != "OVER" else "game over"
+            elif expected_name is not None and name != expected_name:
+                reason = "name does not match your Linux user"
             elif name in STATE["players"]:
                 reason = "name taken"
+            elif name in NAME_OWNERS and uid is not None and NAME_OWNERS[name] != uid:
+                reason = "name owned by another user"
             elif len(STATE["players"]) >= STATE["expected_players"]:
                 reason = "lobby is full"
             else:
                 queue = asyncio.Queue(maxsize=SEND_QUEUE_MAX)
                 STATE["players"][name] = {
                     "writer": writer, "role": "crew", "alive": True,
-                    "queue": queue, "sender": None,
+                    "queue": queue, "sender": None, "uid": uid, "pid": pid,
                 }
+                if uid is not None:
+                    NAME_OWNERS[name] = uid
                 joined = True
                 sender = asyncio.create_task(sender_task(writer, queue))
                 STATE["players"][name]["sender"] = sender
@@ -414,17 +454,60 @@ async def handle_client(reader, writer):
             pass
 
 
+def _parse_allow_users(value):
+    """'alice,bob' -> {uid: 'alice', ...}; empty means no allowlist."""
+    mapping = {}
+    for name in str(value).replace(",", " ").split():
+        try:
+            pw = pwd.getpwnam(name)
+        except KeyError:
+            raise SystemExit("server: no such Linux user: %s" % name)
+        mapping[pw.pw_uid] = name
+    return mapping
+
+
+def _parse_socket_group(value):
+    if not value:
+        return None
+    try:
+        return grp.getgrnam(value).gr_gid
+    except KeyError:
+        try:
+            return int(value)
+        except ValueError:
+            raise SystemExit("server: no such group: %s" % value)
+
+
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--socket", default=commlib.DEFAULT_SOCKET_PATH)
     ap.add_argument("--players", type=int, default=5)
     ap.add_argument("--tasks-goal", type=int, default=20)
     ap.add_argument("--meeting-secs", type=int, default=60)
+    ap.add_argument("--allow-users", default="",
+                    help="comma-separated Linux users allowed to join; "
+                         "name must match the user")
+    ap.add_argument("--socket-mode", default="0777",
+                    help="octal mode for the UNIX socket (default 0777)")
+    ap.add_argument("--socket-group", default=None,
+                    help="group name or gid for the UNIX socket")
     args = ap.parse_args()
+
+    try:
+        socket_mode = int(args.socket_mode, 8)
+    except ValueError:
+        ap.error("--socket-mode must be octal, e.g. 0660")
+
+    ALLOWED_UIDS.clear()
+    ALLOWED_UIDS.update(_parse_allow_users(args.allow_users))
+
     STATE["expected_players"] = args.players
     STATE["tasks_goal"] = args.tasks_goal
     STATE["meeting_secs"] = args.meeting_secs
-    server = await commlib.serve_unix(args.socket, handle_client)
+    server = await commlib.serve_unix(
+        args.socket, handle_client, mode=socket_mode,
+        gid=_parse_socket_group(args.socket_group),
+    )
     print(f"serving on {args.socket}, waiting {args.players} players...")
     asyncio.create_task(leak_task())
     async with server:

@@ -13,7 +13,8 @@
 #   ./play.sh --stop                       # kill the session (+ cgroups if root)
 #   ./play.sh --force                      # replace a server already on the socket
 #
-# Isolation tuning: PLAYER_MEMORY=64M PLAYER_PIDS=24 PLAYER_CPU=50 ./play.sh
+# Isolation tuning: ./play.sh --memory 32M --pids 12 --cpu 25
+# Socket permissions: ./play.sh --users ... --socket-mode 0660 --socket-group starship
 # Extra tuning: TASKS_GOAL=20 MEETING_SECS=60 ./play.sh
 # Socket override: SOCKET=/tmp/other.sock ./play.sh
 
@@ -26,6 +27,7 @@ TASKS_GOAL="${TASKS_GOAL:-20}"
 MEETING_SECS="${MEETING_SECS:-60}"
 NAMES=(wolf1 crew1 crew2 crew3 crew4)
 USERS=()
+ALLOW_USERS=""
 DETACH=0
 FORCE=0
 ISOLATE=1
@@ -35,6 +37,8 @@ PLAYER_MEMORY="${PLAYER_MEMORY:-64M}"
 PLAYER_SWAP="${PLAYER_SWAP:-0}"
 PLAYER_PIDS="${PLAYER_PIDS:-24}"
 PLAYER_CPU="${PLAYER_CPU:-50}"
+SOCKET_MODE="${SOCKET_MODE:-}"
+SOCKET_GROUP="${SOCKET_GROUP:-}"
 EXPECTED=0
 ORIG_ARGS=("$@")
 
@@ -80,6 +84,8 @@ while [[ $# -gt 0 ]]; do
         --swap)        PLAYER_SWAP="$2"; shift 2 ;;
         --pids)        PLAYER_PIDS="$2"; shift 2 ;;
         --cpu)         PLAYER_CPU="$2"; shift 2 ;;
+        --socket-mode) SOCKET_MODE="$2"; shift 2 ;;
+        --socket-group) SOCKET_GROUP="$2"; shift 2 ;;
         --stop)
             STOP=1; shift ;;
         -h|--help)     usage 0 ;;
@@ -142,6 +148,7 @@ command -v python3 >/dev/null || { echo "play.sh: python3 not found" >&2; exit 1
 # --users gives one username per player; names default to those usernames.
 if [[ ${#USERS[@]} -gt 0 ]]; then
     NAMES=("${USERS[@]}")
+    ALLOW_USERS="$(IFS=,; echo "${USERS[*]}")"
     for u in "${USERS[@]}"; do
         if ! id "$u" >/dev/null 2>&1; then
             echo "play.sh: no such user: $u  (sudo useradd -m $u)" >&2
@@ -191,6 +198,15 @@ fi
 rm -f "$SOCKET"
 
 SERVER_CMD="python3 server.py --socket '$SOCKET' --players '$EXPECTED' --tasks-goal '$TASKS_GOAL' --meeting-secs '$MEETING_SECS'"
+if [[ -n "$ALLOW_USERS" ]]; then
+    SERVER_CMD="$SERVER_CMD --allow-users '$ALLOW_USERS'"
+fi
+if [[ -n "${SOCKET_MODE:-}" ]]; then
+    SERVER_CMD="$SERVER_CMD --socket-mode '$SOCKET_MODE'"
+fi
+if [[ -n "${SOCKET_GROUP:-}" ]]; then
+    SERVER_CMD="$SERVER_CMD --socket-group '$SOCKET_GROUP'"
+fi
 if (( EUID == 0 )) && [[ "$RUN_USER" != "root" ]]; then
     # The server stays outside the player cgroups and runs as the real user.
     SERVER_CMD="sudo -u '$RUN_USER' -- $SERVER_CMD"
