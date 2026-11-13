@@ -1,163 +1,142 @@
-# Starship Sabotage — Among Us-like for CSE 536 Project 1
+# Starship Sabotage
 
-Text-based 5-player social-deduction game: **1 impostor vs 4 crew** on a damaged
-starship. Crew complete tasks and repair sabotage; the impostor kills, sabotages
-O2/Reactor, and lies in meetings. Only stdlib — **no external packages**.
+Text-based five-player social-deduction game for CSE 536 Projects 1–3. One
+impostor versus four crew on a damaged starship: the crew complete tasks and
+repair O2/Reactor, the impostor kills, sabotages, and lies in meetings. Each
+player is a separate process (ideally a separate Linux user) talking to an
+authoritative server.
 
-## What the game is
+For Projects 2/3, every player also runs in its own **cgroup v2** leaf with hard
+memory, PID, and CPU limits. The server stays outside the player cgroup subtree,
+so one hostile player cannot OOM or fork-bomb the game server.
 
-Every player is a separate process, ideally a separate Linux user, talking to an
-authoritative server over UNIX domain sockets. The server tracks three shared
-resources — `O2`, `Reactor`, and `Tasks` — and a turn counter. Crew win by
-finishing all tasks or ejecting the impostor; the impostor wins by destroying
-O2/Reactor, reaching parity with the crew, or simply surviving the votes.
-Bodies are not announced: a living player must `report` or call a `meeting`,
-then everyone argues and votes.
+## Quick start
 
-## Quick start 
+Requirements: Linux, Python ≥ 3.10, `tmux`, `sudo`, and cgroup v2
+(`stat -fc %T /sys/fs/cgroup` should print `cgroup2fs`).
+
 ```bash
 cd project-1
-python3 server.py --players 5 --tasks-goal 20 --meeting-secs 60
+./play.sh                  # isolated by default (re-execs sudo)
+./play.sh --no-isolate     # old Project 1 style, no cgroups
 ```
 
-In four more terminals (same machine/user is fine for a first test):
+`play.sh` opens a tmux session: the server in window `0` and one client per
+player. Switch windows with `Ctrl-b n` / `Ctrl-b p`; stop with `./play.sh --stop`.
+
+Three-player demo:
 
 ```bash
-python3 client.py --name crew1
-python3 client.py --name crew2
-python3 client.py --name crew3
-python3 client.py --name crew4
+./play.sh --names "ann bob cid"
 ```
 
-Using `uv` instead is optional:
-
-```bash
-uv run python server.py --players 5 --tasks-goal 20 --meeting-secs 60
-uv run python client.py --name crew1
-```
-
-If you change `--socket`, pass the **same** `--socket` to every client.
-
-## Multi-user setup (assignment requirement)
-
-Each player should be its own Linux user, and each must be able to read the code
-and connect to the socket. Home directories are usually `750`, so copy the
-project somewhere world-readable first:
+One Linux user per player:
 
 ```bash
 sudo cp -r "$PWD" /opt/starship-sabotage
 sudo chmod -R a+rX /opt/starship-sabotage
-```
-
-(Alternative: `chmod o+x "$HOME"` grants traversal without making your home
-directory listable.)
-
-Create the five players once:
-
-```bash
-for u in wolf1 crew1 crew2 crew3 crew4; do sudo useradd -m "$u"; done
-```
-
-Terminal 1 — server (your user):
-
-```bash
 cd /opt/starship-sabotage
-rm -f /tmp/starship.sock
-python3 server.py --players 5 --tasks-goal 20 --meeting-secs 60
+./play.sh --users "wolf1 crew1 crew2 crew3 crew4"
 ```
 
-Terminals 2–6 — one per player, each as its own user:
+The game starts automatically when the expected number of players joins. If
+`--users` is omitted, all clients run as you.
+
+## Isolation limits
+
+Defaults per player:
+
+| Limit | Value | Stops |
+| --- | --- | --- |
+| `memory.max` | `64M` | memory bombs / host OOM |
+| `memory.swap.max` | `0` | swapping around the memory cap |
+| `pids.max` | `24` | fork bombs |
+| `cpu.max` | `50%` | CPU hogs |
+| `memory.oom.group` | `1` | killing the whole offending player tree |
+
+The parent cgroup has an aggregate cap (`players × per-player limit`). The
+server runs outside it as the invoking user; player processes drop back to their
+own UID before `exec`.
 
 ```bash
-sudo -u wolf1 -i
-cd /opt/starship-sabotage
-python3 client.py --name wolf1
+./play.sh --memory 32M --pids 12 --cpu 25        # tune limits
+sudo python3 cgroup.py show --parent starship-cgroup --table
 ```
 
-Repeat for `crew1`…`crew4`. The socket is chmodded `0777` by `serve_unix()` so
-all users can connect via `/tmp/starship.sock` (override with `--socket`).
+Writing cgroup files needs root; `./play.sh` re-execs through `sudo`. If your
+sudo requires a password interactively, run `sudo ./play.sh`. Cgroups constrain
+only the process tree the launcher starts; a manually started unconfined process
+is outside the threat model. Run one isolated game at a time.
 
-## How to play
+## Commands
 
-### Start everything with tmux
-
-`play.sh` opens a tmux session with one window for the server and one per
-player:
-
-```bash
-./play.sh                                         # all clients as you (demo)
-./play.sh --users "wolf1 crew1 crew2 crew3 crew4" # one Linux user per client
-./play.sh --names "ann bob cid"                   # 3-player game
-./play.sh --detach                                # background, no attach
-./play.sh --stop                                  # kill session + socket
-./play.sh --force                                 # replace a server on the socket
-```
-
-`--users` requires the code to be readable by those users (see the multi-user
-setup above); the script checks this and tells you how to fix it. Switch windows
-with `Ctrl-b n` / `Ctrl-b p`, or `Ctrl-b 0` for the server.
-
-### By hand
-
-1. **Lobby.** Start the server, then connect the clients. The game begins
-   automatically when `--players N` people have joined (default 5). Roles are
-   assigned randomly at that moment; your client prints
-   `[you are NAME | role=crew|impostor]`. The last `welcome` line is
-   authoritative — earlier lobby lines are just "waiting n/5".
-2. **Task phase.** Type one command per turn. Crew do `task` and repair
-   sabotage; the impostor pretends to do tasks, kills, and sabotages.
-3. **Meetings.** Anyone alive can `meeting`, or `report <name>` over a body.
-   During a meeting, type `vote <name>` (and `chat <text>` to argue). The
-   meeting ends when every living player has voted or the timer expires.
-4. **Result.** A unique top vote is ejected (role is not revealed). A tie means
-   nobody is ejected. Play continues until a win condition fires.
-
-### Commands
+Type these in a client window:
 
 | Command | Who | Effect |
 | --- | --- | --- |
-| `task` (or `t`) | everyone | Crew: tasks +1. Impostor: fake task, no progress. |
-| `fix o2` | everyone | O2 +15 (max 100). |
-| `fix reactor` | everyone | Reactor +15 (max 100). |
-| `kill <name>` | impostor | Kill a living crew member. 2-turn cooldown. |
-| `sabotage o2\|reactor` | impostor | Drain that system by 20. 2-turn cooldown. |
-| `meeting` | alive | Start a vote. |
-| `report <name>` | alive | Start a vote over a body. |
+| `task` | everyone | Crew: +1 task. Impostor: fake task. |
+| `fix o2` / `fix reactor` | everyone | Repair that system (+15, max 100). |
+| `kill <name>` | impostor | Kill a living crew member (2-turn cooldown). |
+| `sabotage o2\|reactor` | impostor | Drain that system by 20 (2-turn cooldown). |
+| `meeting` / `report <name>` | alive | Start a vote. |
 | `vote <name>` | alive, meeting | Cast your vote. |
-| `chat <text>` | alive (also lobby) | Broadcast a message. |
+| `chat <text>` | alive | Broadcast a message. |
 | `help`, `quit` | local | Show commands / exit. |
 
-Anything unrecognised is sent as chat. Every action advances the turn counter,
-which is what the cooldowns count against.
+Crew win by completing all tasks or ejecting the impostor. The impostor wins if
+O2 or Reactor hits 0, living crew ≤ living impostors, or the crew never ejects
+them. A tie vote ejects nobody. Bodies are not auto-announced.
 
-## Rules
+## Testing and attack demo
 
-- Shared: `O2 100%`, `Reactor 100%`, `Tasks 0/20`.
-- Crew win: all tasks complete, or the impostor is ejected.
-- Impostor wins: O2 or Reactor hits 0, or living crew ≤ living impostors.
-- O2 also leaks `-1` every 15 seconds during the task phase.
-- Meeting length is `--meeting-secs` (default 60), or ends early once all living
-  players have voted. Tie = no eject.
-- Bodies are not auto-announced; use `report`/`meeting`.
-- 3+ players recommended. With 2 players, parity ends the game immediately.
+```bash
+sudo python3 test_isolation.py --game
+```
 
-## Files
+This asserts on kernel counters (`memory.peak`, `pids.peak`, `cpu.stat`,
+`memory.events`) and runs a real five-player game: four bots plus a hostile
+attacker that is OOM-killed inside its own leaf while the server stays alive.
 
-- `commlib.py` — **communications library (single file)**. UNIX domain
-  `SOCK_STREAM` + `asyncio`. JSON-lines framing. API: `send_msg(writer, dict)`,
-  `recv_msg(reader) -> dict`, `connect_socket(path)`, `serve_unix(path, handler)`,
-  `encode_msg/decode_msg`, `DEFAULT_SOCKET_PATH`.
-- `server.py` — authoritative state, lobby, task/meeting/over phases, win checks,
-  cooldowns.
-- `client.py` — one process per player. Line commands, async recv+send.
-- `play.sh` — tmux launcher: server + one client per player, single- or multi-user.
-- `pyproject.toml` — uv packaging metadata (stdlib only, Python >=3.10).
+Manual attack demo:
 
-## Comms primitive
+```bash
+./play.sh --names "ann bob cid dex" --expected 5 --detach
 
-UNIX domain stream sockets with async I/O (`asyncio.start_unix_server` /
-`open_unix_connection`). Unicast: private `welcome` (role), `result`
-(ack/failure). Broadcast: `state`, `event` (sabotage/chat/join), `meeting_start`,
-`meeting_end`, `game_over`. Concurrency: one coroutine per client plus
-`meeting_timeout()` and `leak_task()` (O2 −1/15s), all mutating shared state
-under a single `asyncio.Lock`.
+sudo python3 cglaunch.py --name attacker --user "$USER" \
+    --memory 32M --pids 8 --cpu 25 \
+    -- python3 attack.py --name attacker --socket /tmp/starship.sock \
+    --attack memory --size-mb 128
+```
+
+Other attack modes: `fork`, `cpu`, `flood`, `oversize`, `malformed`, `idle`
+(`python3 attack.py --help`).
+
+## Files and communications API
+
+The communications library is **`commlib.py`**, a single file. It uses UNIX
+domain `SOCK_STREAM` sockets with `asyncio` and JSON-lines framing:
+
+- `encode_msg(msg) -> bytes` / `decode_msg(line) -> dict`
+- `send_msg(writer, msg)` / `recv_msg(reader) -> dict`
+- `connect_socket(path)` / `serve_unix(path, handler)`
+- `DEFAULT_SOCKET_PATH`
+
+Unicast messages are the private `welcome` (role) and `result`; broadcast
+messages are `state`, `event`, `meeting_start`, `meeting_end`, and `game_over`.
+The server fans broadcasts out through bounded per-client queues, with one
+reader and one writer coroutine per client plus meeting/O2 timer tasks.
+
+Other files:
+
+- `server.py` — authoritative state, lobby, phases, win checks.
+- `client.py` — per-player terminal client.
+- `play.sh` — tmux launcher; isolation on by default.
+- `cgroup.py` — cgroup v2 library: parent/leaf setup, limits, stats, cleanup.
+- `cglaunch.py` — run one player in a cgroup, then drop to its Linux user.
+- `attack.py` — memory/fork/CPU/flood/oversize attacks.
+- `bot.py` — auto-player used by the end-to-end test.
+- `test_isolation.py` — kernel-counter tests and the five-player survival game.
+- `pyproject.toml` — packaging metadata (stdlib only).
+
+The report, poster, and submission tarball are course deliverables kept local;
+they are not required to run or test the game.

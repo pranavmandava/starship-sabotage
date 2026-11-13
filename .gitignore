@@ -11,3 +11,8 @@ ssh
 
 # Personal submission notes
 .pdf-notes.md
+
+# Course deliverables and generated submission artifacts (kept local)
+report/
+make_submission.sh
+*.tgz
