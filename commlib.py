@@ -25,6 +25,7 @@ import json
 import os
 import socket
 import struct
+import sys
 
 DEFAULT_SOCKET_PATH = "/tmp/starship.sock"
 _UCRED_SIZE = struct.calcsize("3i")
@@ -87,6 +88,7 @@ async def serve_unix(path: str, handler, mode: int = 0o777, gid=None):
         os.chmod(path, mode)
         if gid is not None:
             os.chown(path, -1, gid)
-    except OSError:
-        pass
+    except OSError as exc:
+        print("commlib: cannot set socket permissions on %s: %s"
+              % (path, exc), file=sys.stderr)
     return server

@@ -80,8 +80,8 @@ is closed.
 
 The socket itself defaults to mode `0777` so distinct users can connect without
 a shared group; unlisted UIDs are rejected at the application layer. If you
-create a dedicated group for the players, tighten the filesystem permissions
-too:
+create a dedicated group containing the players and the server user, tighten the
+filesystem permissions too:
 
 ```bash
 ./play.sh --users "wolf1 crew1 crew2 crew3 crew4" \
